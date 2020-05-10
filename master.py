@@ -5,11 +5,13 @@ import random
 
 class Master():
     def __init__(self):
-        self.num_replicas = 2
+        self.num_replicas = 3
+        self.lease_timeout_secs = 60 #TODO timeout of lease
         self.chunkserver_urls = []
         self.chunkserver_proxies = []
         self.filename_to_chunks = {} # string filename -> list[int] chunkIds
         self.chunk_to_urls = {} # int chunkId -> list[string] urls of replicas
+        self.chunk_to_primary = {} # int chunkId -> string url of primary
         self.chunk_id_counter = 1000 # start at 1000 to differentiate from chunk indexes
         print("master initialized")
 
@@ -43,6 +45,13 @@ class Master():
         chunk_id = self.filename_to_chunks[filename][chunk_idx]
         replica_urls = self.chunk_to_urls[chunk_id]
         return (chunk_id, replica_urls)
+
+    def write(self, filename, chunk_idx):
+        chunk_id = self.filename_to_chunks[filename][chunk_idx]
+        replica_urls = self.chunk_to_urls[chunk_id]
+        if chunk_id not in self.chunk_to_primary:
+            self.chunk_to_primary[chunk_id] = random.choice(replica_urls)
+        return (chunk_id, self.chunk_to_primary[chunk_id], replica_urls)
 
 def main():
     master_server = SimpleXMLRPCServer(('localhost', 9000), allow_none=True)

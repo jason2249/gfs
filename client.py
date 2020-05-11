@@ -16,25 +16,33 @@ class Client():
     def create(self, filename):
         self.master_proxy.create(filename)
 
-    # TODO make reads read across chunk boundaries
     def read(self, filename, byte_offset, amount):
         chunk_idx = byte_offset // self.chunk_size
         chunk_offset = byte_offset % self.chunk_size
 
-        # locate replica urls of chunk
-        if (filename, chunk_idx) in self.read_cache:
-            res = self.read_cache[(filename, chunk_idx)]
-        else:
-            res = self.master_proxy.read(filename, chunk_idx)
-            self.read_cache[(filename,chunk_idx)] = res
-        chunk_id = res[0]
-        replica_urls = res[1]
+        total_to_read = amount
+        amount_to_read_in_chunk = min(self.chunk_size - chunk_offset, total_to_read)
+        s = ''
+        while total_to_read > 0:
+            # locate replica urls of chunk
+            if (filename, chunk_idx) in self.read_cache:
+                res = self.read_cache[(filename, chunk_idx)]
+            else:
+                res = self.master_proxy.read(filename, chunk_idx)
+                self.read_cache[(filename,chunk_idx)] = res
+            chunk_id = res[0]
+            replica_urls = res[1]
 
-        # pick random replica to read from
-        replica_url = random.choice(replica_urls)
-        chunkserver_proxy = ServerProxy(replica_url)
-        res = chunkserver_proxy.read(chunk_id, chunk_offset, amount)
-        return res
+            # pick random replica to read from
+            replica_url = random.choice(replica_urls)
+            chunkserver_proxy = ServerProxy(replica_url)
+            s += chunkserver_proxy.read(chunk_id, chunk_offset, amount_to_read_in_chunk)
+
+            total_to_read -= amount_to_read_in_chunk
+            amount_to_read_in_chunk = min(self.chunk_size, total_to_read)
+            chunk_idx += 1
+            chunk_offset = 0
+        return s
 
     def write(self, filename, data, byte_offset):
         chunk_idx = byte_offset // self.chunk_size

@@ -16,6 +16,7 @@ class Client():
     def create(self, filename):
         self.master_proxy.create(filename)
 
+    # TODO make reads read across chunk boundaries
     def read(self, filename, byte_offset, amount):
         chunk_idx = byte_offset // self.chunk_size
         chunk_offset = byte_offset % self.chunk_size
@@ -35,13 +36,38 @@ class Client():
         res = chunkserver_proxy.read(chunk_id, chunk_offset, amount)
         return res
 
-    def write(self, filename, data, byte_offset=-1):
-        chunk_idx = byte_offset
-        chunk_offset = byte_offset
-        if chunk_idx != -1:
-            chunk_idx = byte_offset // self.chunk_size
-            chunk_offset = byte_offset % self.chunk_size
+    def write(self, filename, data, byte_offset):
+        chunk_idx = byte_offset // self.chunk_size
+        chunk_offset = byte_offset % self.chunk_size
 
+        data_idx = 0
+        total_to_write = len(data)
+        amount_to_write_in_chunk = min(self.chunk_size - chunk_offset, total_to_write)
+
+        first = True
+        backoff_secs = 1
+        while total_to_write > 0:
+            if first:
+                first = False
+            else:
+                chunk_idx += 1
+                self.create(filename)
+            data_piece = data[data_idx:data_idx+amount_to_write_in_chunk]
+            res = self.write_helper(filename, data_piece, chunk_idx)
+            if res != 'success':
+                # error, wait for exponential backoff and retry
+                print(res, 'for ' + filename + ', backing off and retrying in ' \
+                        + str(backoff_secs) + ' seconds')
+                time.sleep(backoff_secs)
+                backoff_secs *= 2
+            else:
+                data_idx += amount_to_write_in_chunk
+                total_to_write -= amount_to_write_in_chunk
+                amount_to_write_in_chunk = min(self.chunk_size, total_to_write)
+        print('Wrote ' + str(len(data)) + ' bytes to ' + filename)
+
+
+    def write_helper(self, filename, data, chunk_idx):
         # locate primary and replica urls
         if (filename, chunk_idx) in self.primary_cache:
             res = self.primary_cache[(filename,chunk_idx)]
@@ -55,7 +81,7 @@ class Client():
         # send data to first replica, which sends data to all other replicas
         replica_url = replica_urls[0]
         chunkserver_proxy = ServerProxy(replica_url)
-        res = chunkserver_proxy.send_data(chunk_id, chunk_offset, data, 1, replica_urls)
+        res = chunkserver_proxy.send_data(chunk_id, data, 1, replica_urls)
         if res != 'success':
             return 'failure sending data to chunkservers'
 
@@ -63,12 +89,11 @@ class Client():
         primary_proxy = ServerProxy(primary)
         secondary_urls = replica_urls[:]
         secondary_urls.remove(primary)
-        append = chunk_offset == -1
-        res = primary_proxy.apply_mutations(chunk_id, append, secondary_urls, primary, [])
+        res = primary_proxy.apply_mutations(chunk_id, secondary_urls, primary, [])
         if res != 'success':
             return 'failure applying mutations to replicas'
 
-        return len(data)
+        return 'success'
 
 def main():
     #TODO move testing functionality into another file

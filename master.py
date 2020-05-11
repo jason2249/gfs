@@ -22,19 +22,19 @@ class Master():
         print('chunkserver_proxies:', self.chunkserver_proxies)
 
     def create(self, filename):
-        #call create on self.num_replicas number of randomly selected servers
+        #randomly sample self.num_replicas servers to host replicas on
         proxy_idxs = random.sample(range(len(self.chunkserver_urls)), self.num_replicas)
+        #assign next chunkId to each chunk sequentially
+        chunk_id = self.chunk_id_counter
         replica_urls = []
         for i in proxy_idxs:
             proxy = self.chunkserver_proxies[i]
-            #assign next chunkId to each chunk sequentially
-            chunk_id = self.chunk_id_counter
             proxy.create(filename, chunk_id)
             replica_urls.append(self.chunkserver_urls[i])
         #store chunkId->list[server] mapping in chunk_to_url
         self.chunk_to_urls[chunk_id] = replica_urls
         self.chunk_id_counter += 1
-        #append this list of chunkIds to list of chunk indexes in filename_to_chunks
+        #append this chunkId to list of chunkIds in filename_to_chunks
         if filename not in self.filename_to_chunks:
             self.filename_to_chunks[filename] = []
         self.filename_to_chunks[filename].append(chunk_id)

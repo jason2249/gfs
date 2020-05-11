@@ -29,7 +29,7 @@ class ChunkServer():
             return res
         #TODO return error if file doesn't exist, use try/catch
 
-    def send_data(self, chunk_id, chunk_offset, data, idx, replica_urls):
+    def send_data(self, chunk_id, data, idx, replica_urls):
         if chunk_id not in self.chunk_id_to_new_data:
             self.chunk_id_to_new_data[chunk_id] = []
         self.chunk_id_to_new_data[chunk_id].append(data)
@@ -37,30 +37,24 @@ class ChunkServer():
             next_url = replica_urls[idx]
             next_proxy = ServerProxy(next_url)
             idx += 1
-            return next_proxy.send_data(chunk_id, chunk_offset, data, idx, replica_urls)
+            return next_proxy.send_data(chunk_id, data, idx, replica_urls)
         print('done storing and sending data:', self.chunk_id_to_new_data)
         return 'success'
 
-    def apply_mutations(self, chunk_id, append, secondary_urls, primary, new_mutations):
+    def apply_mutations(self, chunk_id, secondary_urls, primary, new_mutations):
         if self.url == primary:
             new_mutations = self.chunk_id_to_new_data[chunk_id][:]
         del self.chunk_id_to_new_data[chunk_id]
         filename = self.chunk_id_to_filename[chunk_id]
-        if append:
-            with open(self.root_dir + filename, 'a') as f:
-                for data in new_mutations:
-                    f.write(data)
-        else:
-            #TODO random write support
-            # Need to remember chunk_offset for each new piece of data
-            # then rewrite entire file, overwriting data at each chunk_offset
-            pass
+        with open(self.root_dir + filename, 'a') as f:
+            for data in new_mutations:
+                f.write(data)
         print('applied mutations:', new_mutations)
         if self.url != primary:
             return 'success'
         for secondary_url in secondary_urls:
             proxy = ServerProxy(secondary_url)
-            res = proxy.apply_mutations(chunk_id, append, [], primary, new_mutations)
+            res = proxy.apply_mutations(chunk_id, [], primary, new_mutations)
             if res != 'success':
                 return 'failed applying mutation to secondary'
         return 'success'

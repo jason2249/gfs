@@ -9,12 +9,16 @@ class Client():
         self.chunk_size = 64
         self.master_proxy = ServerProxy('http://localhost:9000')
         # read_cache: (filename,chunk_idx) -> [chunk_id, [replica urls]]
+        #TODO timeout entries in read cache
         self.read_cache = {}
         # primary_cache: (filename,chunk_idx) -> [chunk_id, primary, [replica urls]]
         self.primary_cache = {}
 
     def create(self, filename):
-        self.master_proxy.create(filename)
+        return self.master_proxy.create(filename)
+
+    def delete(self, filename):
+        return self.master_proxy.delete(filename)
 
     def read(self, filename, byte_offset, amount):
         chunk_idx = byte_offset // self.chunk_size
@@ -29,6 +33,8 @@ class Client():
                 res = self.read_cache[(filename, chunk_idx)]
             else:
                 res = self.master_proxy.read(filename, chunk_idx)
+                if res == 'file not found':
+                    return res
                 self.read_cache[(filename,chunk_idx)] = res
             chunk_id = res[0]
             replica_urls = res[1]
@@ -63,6 +69,8 @@ class Client():
             data_piece = data[data_idx:data_idx+amount_to_write_in_chunk]
             res = self.write_helper(filename, data_piece, chunk_idx)
             if res != 'success':
+                if res == 'file not found':
+                    return res
                 # error, wait for exponential backoff and retry
                 print(res, 'for ' + filename + ', backing off and retrying in ' \
                         + str(backoff_secs) + ' seconds')
@@ -81,6 +89,8 @@ class Client():
             res = self.primary_cache[(filename,chunk_idx)]
         else:
             res = self.master_proxy.write(filename, chunk_idx)
+            if res == 'file not found':
+                return res
             self.primary_cache[(filename,chunk_idx)] = res
         chunk_id = res[0]
         primary = res[1]

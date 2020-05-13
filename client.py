@@ -1,16 +1,16 @@
 from xmlrpc.client import ServerProxy
 
 import random
-import sys
 import time
 
 class Client():
-    def __init__(self):
-        self.chunk_size = 64
-        self.master_proxy = ServerProxy('http://localhost:9000')
+    def __init__(self, chunk_size=64, master_url='http://localhost:9000', \
+            cache_timeout=60):
+        self.chunk_size = chunk_size
+        self.master_proxy = ServerProxy(master_url)
         # read_cache: (filename,chunk_idx) -> [chunk_id,[replica urls],time]
         self.read_cache = {}
-        self.read_cache_timeout_secs = 60
+        self.read_cache_timeout_secs = cache_timeout
         # primary_cache: (filename,chunk_idx) -> [chunk_id,primary,[replica urls]]
         self.primary_cache = {}
 
@@ -121,22 +121,5 @@ class Client():
 
         return 'success'
 
-def main():
-    #TODO move testing functionality into another file
-    c = Client()
-    if sys.argv[1] == '0':
-        c.create("hello.txt")
-    elif sys.argv[1] == '1':
-        for i in range(10):
-            time.sleep(random.uniform(.01, .1))
-            c.write("hello.txt", "hello")
-            print('hello iteration', i)
-    else:
-        for i in range(10):
-            time.sleep(random.uniform(.01, .1))
-            c.write("hello.txt", "bye")
-            print('bye iteration', i)
 
-if __name__ == '__main__':
-    main()
 

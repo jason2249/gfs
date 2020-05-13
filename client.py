@@ -8,10 +8,10 @@ class Client():
     def __init__(self):
         self.chunk_size = 64
         self.master_proxy = ServerProxy('http://localhost:9000')
-        # read_cache: (filename,chunk_idx) -> [chunk_id, [replica urls]]
-        #TODO timeout entries in read cache
+        # read_cache: (filename,chunk_idx) -> [chunk_id,[replica urls],time]
         self.read_cache = {}
-        # primary_cache: (filename,chunk_idx) -> [chunk_id, primary, [replica urls]]
+        self.read_cache_timeout_secs = 60
+        # primary_cache: (filename,chunk_idx) -> [chunk_id,primary,[replica urls]]
         self.primary_cache = {}
 
     def create(self, filename):
@@ -29,12 +29,20 @@ class Client():
         s = ''
         while total_to_read > 0:
             # locate replica urls of chunk
+            should_contact_master = True
             if (filename, chunk_idx) in self.read_cache:
                 res = self.read_cache[(filename, chunk_idx)]
-            else:
+                original_cache_time = res[2]
+                if time.time() <= original_cache_time + self.read_cache_timeout_secs:
+                    #refresh original cache time
+                    self.read_cache[(filename, chunk_idx)][2] = time.time()
+                    should_contact_master = False
+
+            if should_contact_master:
                 res = self.master_proxy.read(filename, chunk_idx)
                 if res == 'file not found':
                     return res
+                res.append(time.time())
                 self.read_cache[(filename,chunk_idx)] = res
             chunk_id = res[0]
             replica_urls = res[1]

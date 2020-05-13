@@ -112,12 +112,18 @@ class Client():
             return 'failure sending data to chunkservers'
 
         # apply mutations on primary, then secondaries
-        primary_proxy = ServerProxy(primary)
-        secondary_urls = replica_urls[:]
-        secondary_urls.remove(primary)
-        res = primary_proxy.apply_mutations(chunk_id, secondary_urls, primary, [])
-        if res != 'success':
-            return 'failure applying mutations to replicas'
+        res = ''
+        while res != 'success':
+            primary_proxy = ServerProxy(primary)
+            secondary_urls = replica_urls[:]
+            secondary_urls.remove(primary)
+            res = primary_proxy.apply_mutations(chunk_id, secondary_urls, primary, [])
+            if res == 'not primary':
+                new_res = self.master_proxy.write(filename, chunk_idx)
+                primary = new_res[1]
+                replica_urls = new_res[2]
+            elif res == 'failed applying mutation to secondary':
+                return res
 
         return 'success'
 

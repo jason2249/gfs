@@ -7,7 +7,7 @@ import time
 class Master():
     def __init__(self):
         self.num_replicas = 3
-        self.lease_timeout_secs = 60 #TODO timeout of lease
+        self.lease_duration_secs = 60
         self.deleted_file_duration_secs = 60 #TODO duration to keep a deleted file
         self.chunkserver_urls = []
         self.chunkserver_proxies = []
@@ -68,9 +68,24 @@ class Master():
             return 'file not found'
         chunk_id = self.filename_to_chunks[filename][chunk_idx]
         replica_urls = self.chunk_to_urls[chunk_id]
-        if chunk_id not in self.chunk_to_primary:
-            self.chunk_to_primary[chunk_id] = random.choice(replica_urls)
-        return (chunk_id, self.chunk_to_primary[chunk_id], replica_urls)
+
+        pick_new_primary = True
+        if chunk_id in self.chunk_to_primary:
+            res = self.chunk_to_primary[chunk_id]
+            original_cache_time = res[1]
+            if time.time() <= original_cache_time + self.lease_duration_secs:
+                pick_new_primary = False
+                # leases are refreshed through heartbeat messages, not write requests
+        if pick_new_primary:
+            print('picking new primary')
+            primary_url = random.choice(replica_urls)
+            primary_proxy = ServerProxy(primary_url)
+            primary_proxy.assign_primary(chunk_id, self.lease_duration_secs)
+            self.chunk_to_primary[chunk_id] = [primary_url, time.time()]
+        else:
+            print('reused old primary')
+
+        return (chunk_id, self.chunk_to_primary[chunk_id][0], replica_urls)
 
 def main():
     master_server = SimpleXMLRPCServer(('localhost', 9000), allow_none=True)

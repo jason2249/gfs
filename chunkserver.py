@@ -2,6 +2,7 @@ from xmlrpc.client import ServerProxy
 from xmlrpc.server import SimpleXMLRPCServer
 
 import sys
+import time
 
 class ChunkServer():
     def __init__(self, host, port):
@@ -11,6 +12,7 @@ class ChunkServer():
         self.url = 'http://' + host + ':' + port
         self.chunk_id_to_filename = {} # int chunk_id -> str filename+chunk_id
         self.chunk_id_to_new_data = {} # int chunk_id -> list[str] new data written
+        self.chunk_id_to_timeout = {} # int chunk_id -> float lease timeout
         print("server linked with master")
 
     def create(self, filename, chunk_id):
@@ -41,8 +43,16 @@ class ChunkServer():
         print('done storing and sending data:', self.chunk_id_to_new_data)
         return 'success'
 
+    def assign_primary(self, chunk_id, lease_duration):
+        self.chunk_id_to_timeout[chunk_id] = time.time() + lease_duration
+
     def apply_mutations(self, chunk_id, secondary_urls, primary, new_mutations):
         if self.url == primary:
+            print('is primary')
+            if chunk_id not in self.chunk_id_to_timeout:
+                return 'not primary'
+            if time.time() > self.chunk_id_to_timeout[chunk_id]:
+                return 'not primary'
             new_mutations = self.chunk_id_to_new_data[chunk_id][:]
         del self.chunk_id_to_new_data[chunk_id]
         filename = self.chunk_id_to_filename[chunk_id]

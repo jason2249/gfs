@@ -18,6 +18,12 @@ class Client():
         return self.master_proxy.create(filename)
 
     def delete(self, filename):
+        to_delete = []
+        for f, chunk_idx in self.primary_cache:
+            if f == filename:
+                to_delete.append((f, chunk_idx))
+        for tup in to_delete:
+            del self.primary_cache[tup]
         return self.master_proxy.delete(filename)
 
     def read(self, filename, byte_offset, amount):
@@ -120,6 +126,8 @@ class Client():
             res = primary_proxy.apply_mutations(chunk_id, secondary_urls, primary, [])
             if res == 'not primary':
                 new_res = self.master_proxy.write(filename, chunk_idx)
+                self.primary_cache[(filename, chunk_idx)] = new_res
+                chunk_id = new_res[0]
                 primary = new_res[1]
                 replica_urls = new_res[2]
             elif res == 'failed applying mutation to secondary':

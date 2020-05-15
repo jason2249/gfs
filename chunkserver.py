@@ -1,7 +1,9 @@
 from xmlrpc.client import ServerProxy
 from xmlrpc.server import SimpleXMLRPCServer
 
+import os
 import sys
+import threading
 import time
 
 class ChunkServer():
@@ -13,7 +15,22 @@ class ChunkServer():
         self.chunk_id_to_filename = {} # int chunk_id -> str filename+chunk_id
         self.chunk_id_to_new_data = {} # int chunk_id -> list[str] new data written
         self.chunk_id_to_timeout = {} # int chunk_id -> float lease timeout
+        self.thread_interval = 30
+        background_thread = threading.Thread(target=self.background_thread, args=())
+        background_thread.daemon = True
+        background_thread.start()
         print("server linked with master")
+
+    def background_thread(self):
+        while True:
+            chunk_ids = list(self.chunk_id_to_filename.keys())
+            deleted_chunk_ids = self.master_proxy.heartbeat(chunk_ids)
+            for chunk_id in deleted_chunk_ids:
+                filename = self.chunk_id_to_filename[chunk_id]
+                os.remove(self.root_dir + filename)
+                del self.chunk_id_to_filename[chunk_id]
+            print('deleted chunk ids:', deleted_chunk_ids)
+            time.sleep(self.thread_interval)
 
     def create(self, filename, chunk_id):
         chunk_filename = filename + str(chunk_id)
@@ -43,16 +60,20 @@ class ChunkServer():
         print('done storing and sending data:', self.chunk_id_to_new_data)
         return 'success'
 
-    def assign_primary(self, chunk_id, lease_duration):
-        self.chunk_id_to_timeout[chunk_id] = time.time() + lease_duration
+    def assign_primary(self, chunk_id, lease_timeout):
+        print('assigning as primary for chunk id', chunk_id)
+        self.chunk_id_to_timeout[chunk_id] = lease_timeout
 
     def apply_mutations(self, chunk_id, secondary_urls, primary, new_mutations):
         if self.url == primary:
-            print('is primary')
             if chunk_id not in self.chunk_id_to_timeout:
+                print('not primary, chunk id not in dict:', chunk_id)
                 return 'not primary'
             if time.time() > self.chunk_id_to_timeout[chunk_id]:
+                print('not primary, lease timed out:', chunk_id)
+                del self.chunk_id_to_timeout[chunk_id]
                 return 'not primary'
+            print('is primary for chunk id:', chunk_id)
             new_mutations = self.chunk_id_to_new_data[chunk_id][:]
         del self.chunk_id_to_new_data[chunk_id]
         filename = self.chunk_id_to_filename[chunk_id]

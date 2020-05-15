@@ -37,6 +37,9 @@ def multi_chunk_files_test():
         offset += len(s)
         expected1 += s
     res = c.read('hello.txt', 0, offset)
+    if res != expected1:
+        print('res:', res)
+        print('expected:', expected1)
     assert(res == expected1)
 
     offset = 0
@@ -48,6 +51,8 @@ def multi_chunk_files_test():
         expected2 += s
     res = c.read('goodbye.txt', 0, offset)
     assert(res == expected2)
+    c.delete('hello.txt')
+    c.delete('goodbye.txt')
     print('passed multi_chunk_files_test')
 
 def multi_client_same_file_sequential_test():
@@ -68,6 +73,7 @@ def multi_client_same_file_sequential_test():
             expected += 'bye'
     res = c2.read('test3.txt', 0, offset)
     assert(res == expected)
+    c.delete('test3.txt')
     print('passed multi_client_same_file_sequential_test')
 
 if __name__ == '__main__':

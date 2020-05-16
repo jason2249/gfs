@@ -16,8 +16,7 @@ class Master():
         self.num_replicas = 3
         self.lease_duration_secs = 30
         self.deleted_file_duration_secs = 30
-        self.chunkserver_urls = []
-        self.chunkserver_proxies = []
+        self.chunkserver_url_to_proxy = {}
         self.filename_to_chunks = {} # string filename -> FileInfo
         self.chunk_to_filename = {} # int chunkId -> string filename
         self.chunk_to_urls = {} # int chunkId -> list[string] urls of replicas
@@ -71,20 +70,20 @@ class Master():
 
     def link_with_master(self, host, port):
         url = 'http://' + host + ':' + port
-        self.chunkserver_urls.append(url)
-        self.chunkserver_proxies.append(ServerProxy(url))
-        print('chunkserver_proxies:', self.chunkserver_proxies)
+        self.chunkserver_url_to_proxy[url] = ServerProxy(url)
+        print('chunkserver_url_to_proxy:', self.chunkserver_url_to_proxy)
 
     def create(self, filename):
         #randomly sample self.num_replicas servers to host replicas on
-        proxy_idxs = random.sample(range(len(self.chunkserver_urls)), self.num_replicas)
+        all_urls = self.chunkserver_url_to_proxy.keys()
+        proxy_urls = random.sample(all_urls, self.num_replicas)
         #assign next chunkId to each chunk sequentially
         chunk_id = self.chunk_id_counter
         replica_urls = []
-        for i in proxy_idxs:
-            proxy = self.chunkserver_proxies[i]
+        for url in proxy_urls:
+            proxy = self.chunkserver_url_to_proxy[url]
             proxy.create(filename, chunk_id)
-            replica_urls.append(self.chunkserver_urls[i])
+            replica_urls.append(url)
         #store chunkId->list[server] mapping in chunk_to_url
         self.chunk_to_urls[chunk_id] = replica_urls
         self.chunk_to_filename[chunk_id] = filename
@@ -132,7 +131,7 @@ class Master():
         if pick_new_primary:
             print('picking new primary for chunk id', chunk_id)
             primary_url = random.choice(replica_urls)
-            primary_proxy = ServerProxy(primary_url)
+            primary_proxy = self.chunkserver_url_to_proxy[primary_url]
             timeout = time.time() + self.lease_duration_secs
             primary_proxy.assign_primary(chunk_id, timeout)
             self.chunk_to_primary[chunk_id] = [primary_url, timeout]

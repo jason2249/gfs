@@ -1,6 +1,8 @@
 from xmlrpc.client import ServerProxy
 from xmlrpc.server import SimpleXMLRPCServer
 
+import os.path
+import pickle
 import random
 import threading
 import time
@@ -16,18 +18,58 @@ class Master():
         self.num_replicas = 3
         self.lease_duration_secs = 30
         self.deleted_file_duration_secs = 30
+
         self.chunkserver_url_to_proxy = {}
         self.filename_to_chunks = {} # string filename -> FileInfo
         self.chunk_to_filename = {} # int chunkId -> string filename
         self.chunk_to_urls = {} # int chunkId -> list[string] urls of replicas
         self.chunk_to_primary = {} # int chunkId -> string url of primary
         self.chunk_id_counter = 1000 # start at 1000 to differentiate from chunk indexes
+
+        self.root_dir = '/Users/jason/temp/master/'
+        self.init_from_log()
         self.thread_interval = 30
         background_thread = threading.Thread(target=self.background_thread, \
                 args=[self.thread_interval])
         background_thread.daemon = True
         background_thread.start()
-        print("master initialized")
+        print('master initialized')
+
+    def init_from_log(self):
+        if not os.path.isfile(self.root_dir + 'log.txt'):
+            print('initializing from scratch')
+            return
+        print('initializing from log')
+        chunkserver_urls = []
+        with open(self.root_dir + 'log.txt', 'rb') as f:
+            chunkserver_urls = pickle.load(f)
+            self.filename_to_chunks = pickle.load(f)
+            self.chunk_to_filename = pickle.load(f)
+            self.chunk_to_primary = pickle.load(f)
+            self.chunk_id_counter = pickle.load(f)
+        for url in chunkserver_urls:
+            cs_proxy = ServerProxy(url)
+            try:
+                chunks_on_chunkserver = cs_proxy.get_chunks()
+            except:
+                # chunkserver is down
+                continue
+            self.chunkserver_url_to_proxy[url] = cs_proxy
+            for chunk_id in chunks_on_chunkserver:
+                if chunk_id not in self.chunk_to_urls:
+                    self.chunk_to_urls[chunk_id] = []
+                self.chunk_to_urls[chunk_id].append(url)
+
+    def flush_to_log(self):
+        #TODO possible improvement by writing only what has changed to its own file
+        # instead of writing everything to one file
+        with open(self.root_dir + 'log.txt', 'wb') as f:
+            pickle.dump(list(self.chunkserver_url_to_proxy.keys()), f)
+            pickle.dump(self.filename_to_chunks, f)
+            pickle.dump(self.chunk_to_filename, f)
+            pickle.dump(self.chunk_to_primary, f)
+            pickle.dump(self.chunk_id_counter, f)
+        print('flushed metadata to log')
 
     def background_thread(self, interval):
         while True:
@@ -66,11 +108,15 @@ class Master():
             del self.chunk_to_filename[chunkId]
             del self.chunk_to_urls[chunkId]
             del self.chunk_to_primary[chunkId]
+
+        if len(filenames_to_delete) > 0 or len(chunks_to_delete) > 0:
+            self.flush_to_log()
         print('after garbage collection:', self.filename_to_chunks, self.chunk_to_filename)
 
     def link_with_master(self, host, port):
         url = 'http://' + host + ':' + port
         self.chunkserver_url_to_proxy[url] = ServerProxy(url)
+        self.flush_to_log()
         print('chunkserver_url_to_proxy:', self.chunkserver_url_to_proxy)
 
     def create(self, filename):
@@ -94,6 +140,7 @@ class Master():
         self.filename_to_chunks[filename].chunk_list.append(chunk_id)
         print('after CREATE filename_to_chunks:', self.filename_to_chunks)
         print('chunk_to_urls:', self.chunk_to_urls)
+        self.flush_to_log()
         return 'successfully created ' + filename
 
     def delete(self, filename):
@@ -105,11 +152,14 @@ class Master():
         deleted_filename = 'DELETED_' + filename
         self.filename_to_chunks[deleted_filename] = FileInfo(True, t, chunk_list)
         print('after DELETE filename_to_chunks:', self.filename_to_chunks)
+        self.flush_to_log()
         return 'successfully deleted ' + filename
 
     def read(self, filename, chunk_idx):
         if filename not in self.filename_to_chunks:
             return 'file not found'
+        if chunk_idx > len(self.filename_to_chunks[filename].chunk_list) - 1:
+            return 'requested chunk idx out of range'
         chunk_id = self.filename_to_chunks[filename].chunk_list[chunk_idx]
         replica_urls = self.chunk_to_urls[chunk_id]
         print('READ returning:', chunk_id, replica_urls)
@@ -135,6 +185,7 @@ class Master():
             timeout = time.time() + self.lease_duration_secs
             primary_proxy.assign_primary(chunk_id, timeout)
             self.chunk_to_primary[chunk_id] = [primary_url, timeout]
+            self.flush_to_log()
         else:
             print('reused old primary for chunk id', chunk_id)
 

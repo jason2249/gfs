@@ -46,7 +46,7 @@ class Client():
 
             if should_contact_master:
                 res = self.master_proxy.read(filename, chunk_idx)
-                if res == 'file not found':
+                if res == 'file not found' or res == 'requested chunk idx out of range':
                     return res
                 res.append(time.time())
                 self.read_cache[(filename,chunk_idx)] = res

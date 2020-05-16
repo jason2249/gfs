@@ -24,13 +24,24 @@ class ChunkServer():
     def background_thread(self):
         while True:
             chunk_ids = list(self.chunk_id_to_filename.keys())
-            deleted_chunk_ids = self.master_proxy.heartbeat(chunk_ids)
+            while True:
+                try:
+                    deleted_chunk_ids = self.master_proxy.heartbeat(chunk_ids)
+                    break
+                except:
+                    print('error connecting to master, retrying in 10 seconds...')
+                    time.sleep(10)
             for chunk_id in deleted_chunk_ids:
                 filename = self.chunk_id_to_filename[chunk_id]
                 os.remove(self.root_dir + filename)
                 del self.chunk_id_to_filename[chunk_id]
             print('deleted chunk ids:', deleted_chunk_ids)
             time.sleep(self.thread_interval)
+
+    def get_chunks(self):
+        print('sending list of owned chunks to master')
+        chunks = list(self.chunk_id_to_filename.keys())
+        return chunks
 
     def create(self, filename, chunk_id):
         chunk_filename = filename + str(chunk_id)

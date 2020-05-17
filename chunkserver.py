@@ -9,24 +9,39 @@ import time
 class ChunkServer():
     def __init__(self, host, port):
         self.master_proxy = ServerProxy('http://localhost:9000')
-        res = self.master_proxy.link_with_master(host, port)
         self.root_dir = '/Users/jason/temp/' + port + '/'
         self.url = 'http://' + host + ':' + port
         self.chunk_id_to_filename = {} # int chunk_id -> str filename+chunk_id
         self.chunk_id_to_new_data = {} # int chunk_id -> list[str] new data written
         self.chunk_id_to_timeout = {} # int chunk_id -> float lease timeout
+
+        self.init_from_files()
+        chunk_list = self.get_chunks()
+        self.master_proxy.link_with_master(host, port, chunk_list)
+
         self.thread_interval = 30
         background_thread = threading.Thread(target=self.background_thread, args=())
         background_thread.daemon = True
         background_thread.start()
         print("server linked with master")
 
+    def init_from_files(self):
+        #initialize self.chunk_id_to_filename based on files existing on disk
+        chunk_files = os.listdir(self.root_dir)
+        for filename in chunk_files:
+            if filename == '.DS_Store':
+                continue
+            underscore_idx = filename.rfind('_')
+            chunk_id = int(filename[underscore_idx+1:])
+            self.chunk_id_to_filename[chunk_id] = filename
+        print('initialized from files:', self.chunk_id_to_filename)
+
     def background_thread(self):
         while True:
-            chunk_ids = list(self.chunk_id_to_filename.keys())
+            chunk_ids = self.get_chunks()
             while True:
                 try:
-                    deleted_chunk_ids = self.master_proxy.heartbeat(chunk_ids)
+                    deleted_chunk_ids = self.master_proxy.heartbeat(chunk_ids, self.url)
                     break
                 except:
                     print('error connecting to master, retrying in 10 seconds...')
@@ -38,13 +53,31 @@ class ChunkServer():
             print('deleted chunk ids:', deleted_chunk_ids)
             time.sleep(self.thread_interval)
 
+    def replicate_data(self, chunk_id, replica_url):
+        replica_proxy = ServerProxy(replica_url)
+        res = replica_proxy.get_data_for_chunk(chunk_id)
+        filename = res[0]
+        data = res[1]
+        with open(self.root_dir + filename, 'w') as f:
+            f.write(data)
+        self.chunk_id_to_filename[chunk_id] = filename
+        print('copied chunk', chunk_id, 'from', replica_url, 'to myself')
+
+    def get_data_for_chunk(self, chunk_id):
+        filename = self.chunk_id_to_filename[chunk_id]
+        res = None
+        with open(self.root_dir + filename) as f:
+            res = f.read()
+        print('sending data for', filename, chunk_id, 'to other replica')
+        return (filename, res)
+
     def get_chunks(self):
         print('sending list of owned chunks to master')
         chunks = list(self.chunk_id_to_filename.keys())
         return chunks
 
     def create(self, filename, chunk_id):
-        chunk_filename = filename + str(chunk_id)
+        chunk_filename = filename + '_' + str(chunk_id)
         #TODO change to open 'x' so it fails if already exists?
         with open(self.root_dir + chunk_filename, 'w') as f:
             pass
@@ -85,8 +118,11 @@ class ChunkServer():
                 del self.chunk_id_to_timeout[chunk_id]
                 return 'not primary'
             print('is primary for chunk id:', chunk_id)
+            print('self.chunk_id_to_new_data', self.chunk_id_to_new_data)
             new_mutations = self.chunk_id_to_new_data[chunk_id][:]
+        print('after this')    
         del self.chunk_id_to_new_data[chunk_id]
+        print('in apply mutations,', self.chunk_id_to_filename, chunk_id, type(chunk_id))
         filename = self.chunk_id_to_filename[chunk_id]
         with open(self.root_dir + filename, 'a') as f:
             for data in new_mutations:

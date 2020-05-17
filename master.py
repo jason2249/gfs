@@ -15,7 +15,7 @@ class FileInfo():
 
 class Master():
     def __init__(self):
-        self.num_replicas = 3
+        self.num_replicas = 2
         self.lease_duration_secs = 30
         self.deleted_file_duration_secs = 30
 
@@ -29,6 +29,7 @@ class Master():
         self.root_dir = '/Users/jason/temp/master/'
         self.init_from_log()
         self.thread_interval = 30
+        self.url_to_heartbeat_time = {} # string url -> float time of last hearbeat
         background_thread = threading.Thread(target=self.background_thread, \
                 args=[self.thread_interval])
         background_thread.daemon = True
@@ -74,15 +75,32 @@ class Master():
     def background_thread(self, interval):
         while True:
             self.garbage_collect()
-            #TODO check what replicas have sent heartbeats recently
-            # if any have stopped for a certain period, re-replicate their chunks
+            self.check_heartbeats()
+            self.rereplicate_chunks()
             time.sleep(interval)
 
-    def heartbeat(self, chunk_ids):
+    def check_heartbeats(self):
+        urls_to_delete = []
+        for url in self.url_to_heartbeat_time:
+            last_heartbeat_time = self.url_to_heartbeat_time[url]
+            # set expiration of heartbeat to be thread interval + delta
+            heartbeat_expiration = last_heartbeat_time + self.thread_interval + 5
+            if time.time() > heartbeat_expiration:
+                print('did not receive heartbeat from', url)
+                self.remove_chunkserver(url)
+                urls_to_delete.append(url)
+        for url in urls_to_delete:
+            del self.url_to_heartbeat_time[url]
+
+    def heartbeat(self, chunk_ids, url):
+        print('received heartbeat from', url)
+        self.url_to_heartbeat_time[url] = time.time()
         deleted_chunk_ids = []
         for chunk_id in chunk_ids:
             if chunk_id not in self.chunk_to_filename:
                 deleted_chunk_ids.append(chunk_id)
+        if len(deleted_chunk_ids) > 0:
+            print('does not have metadata for:', deleted_chunk_ids)
         return deleted_chunk_ids
 
     def garbage_collect(self):
@@ -93,6 +111,8 @@ class Master():
             if f.deleted:
                 if time.time() > f.deleted_time + self.deleted_file_duration_secs:
                     filenames_to_delete.append(filename)
+        if len(filenames_to_delete) > 0:
+            print('deleting filenames:', filenames_to_delete)
         for filename in filenames_to_delete:
             del self.filename_to_chunks[filename]
 
@@ -101,9 +121,11 @@ class Master():
         for chunkId in self.chunk_to_filename:
             f = self.chunk_to_filename[chunkId]
             deleted_f = 'DELETED_' + f
-            if filename not in self.filename_to_chunks and \
+            if f not in self.filename_to_chunks and \
                     deleted_f not in self.filename_to_chunks:
                 chunks_to_delete.append(chunkId)
+        if len(chunks_to_delete) > 0:
+            print('deleting chunks:', chunks_to_delete)
         for chunkId in chunks_to_delete:
             del self.chunk_to_filename[chunkId]
             del self.chunk_to_urls[chunkId]
@@ -113,11 +135,54 @@ class Master():
             self.flush_to_log()
         print('after garbage collection:', self.filename_to_chunks, self.chunk_to_filename)
 
-    def link_with_master(self, host, port):
+    def link_with_master(self, host, port, chunk_list):
         url = 'http://' + host + ':' + port
         self.chunkserver_url_to_proxy[url] = ServerProxy(url)
+        for chunk_id in chunk_list:
+            if chunk_id not in self.chunk_to_urls:
+                self.chunk_to_urls[chunk_id] = []
+            if url not in self.chunk_to_urls[chunk_id]:
+                self.chunk_to_urls[chunk_id].append(url)
         self.flush_to_log()
         print('chunkserver_url_to_proxy:', self.chunkserver_url_to_proxy)
+
+    def remove_chunkserver(self, url_to_remove):
+        # remove url of failed chunkserver from chunk_to_urls and chunkserver_url_to_proxy
+        del self.chunkserver_url_to_proxy[url_to_remove]
+        for chunk_id in self.chunk_to_urls:
+            replica_list = self.chunk_to_urls[chunk_id]
+            new_list = []
+            for replica_url in replica_list:
+                if replica_url == url_to_remove:
+                    continue
+                new_list.append(replica_url)
+            self.chunk_to_urls[chunk_id] = new_list
+        print('removed failed chunkserver at', url_to_remove)
+        print('remaining chunk_to_urls:', self.chunk_to_urls)
+
+    def rereplicate_chunks(self):
+        # loop through self.chunk_to_urls
+        # for every chunk id with < self.num_replicas replicas
+        #   replicate this chunk to another chunkserver
+        for chunk_id in self.chunk_to_urls:
+            replica_list = self.chunk_to_urls[chunk_id]
+            if len(replica_list) >= self.num_replicas:
+                continue
+            all_urls = self.chunkserver_url_to_proxy.keys()
+            # get all urls that don't contain a replica for this chunk
+            urls_without_replicas = [url for url in all_urls if url not in replica_list]
+            for i in range(len(replica_list), self.num_replicas):
+                # pick a chunkserver that doesn't already have this chunk
+                if len(urls_without_replicas) == 0:
+                    print('not enough chunkservers to replicate chunk')
+                    break
+                url = urls_without_replicas.pop()
+                # pick random replica to copy from
+                replica = random.choice(replica_list)
+                cs_proxy = self.chunkserver_url_to_proxy[url]
+                cs_proxy.replicate_data(chunk_id, replica)
+                self.chunk_to_urls[chunk_id].append(url)
+                print('re-replicated chunk', chunk_id, 'from', replica, 'to', url)
 
     def create(self, filename):
         #randomly sample self.num_replicas servers to host replicas on
@@ -128,7 +193,11 @@ class Master():
         replica_urls = []
         for url in proxy_urls:
             proxy = self.chunkserver_url_to_proxy[url]
-            proxy.create(filename, chunk_id)
+            try:
+                proxy.create(filename, chunk_id)
+            except:
+                self.remove_chunkserver(url)
+                continue
             replica_urls.append(url)
         #store chunkId->list[server] mapping in chunk_to_url
         self.chunk_to_urls[chunk_id] = replica_urls
@@ -165,7 +234,7 @@ class Master():
         print('READ returning:', chunk_id, replica_urls)
         return (chunk_id, replica_urls)
 
-    def write(self, filename, chunk_idx):
+    def write(self, filename, chunk_idx, force_new_primary):
         if filename not in self.filename_to_chunks:
             return 'file not found'
         chunk_id = self.filename_to_chunks[filename].chunk_list[chunk_idx]
@@ -178,12 +247,20 @@ class Master():
             if time.time() <= original_cache_timeout:
                 pick_new_primary = False
                 # leases are refreshed through heartbeat messages, not write requests
-        if pick_new_primary:
+        if force_new_primary or pick_new_primary:
             print('picking new primary for chunk id', chunk_id)
-            primary_url = random.choice(replica_urls)
-            primary_proxy = self.chunkserver_url_to_proxy[primary_url]
-            timeout = time.time() + self.lease_duration_secs
-            primary_proxy.assign_primary(chunk_id, timeout)
+            while len(replica_urls) > 0:
+                primary_url = random.choice(replica_urls)
+                primary_proxy = self.chunkserver_url_to_proxy[primary_url]
+                timeout = time.time() + self.lease_duration_secs
+                try:
+                    primary_proxy.assign_primary(chunk_id, timeout)
+                    break
+                except:
+                    self.remove_chunkserver(primary_url)
+                    replica_urls = self.chunk_to_urls[chunk_id]
+            if len(replica_urls) == 0:
+                return 'no replicas remaining for chunk id ' + str(chunk_id)
             self.chunk_to_primary[chunk_id] = [primary_url, timeout]
             self.flush_to_log()
         else:

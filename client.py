@@ -66,8 +66,9 @@ class Client():
 
     def write(self, filename, data, byte_offset):
         chunk_idx = byte_offset // self.chunk_size
+        first_chunk_idx = chunk_idx
         chunk_offset = byte_offset % self.chunk_size
-
+        
         data_idx = 0
         total_to_write = len(data)
         amount_to_write_in_chunk = min(self.chunk_size - chunk_offset, total_to_write)
@@ -75,10 +76,9 @@ class Client():
         first = True
         backoff_secs = 1
         while total_to_write > 0:
-            if first:
-                first = False
-            else:
-                chunk_idx += 1
+            print('loop here')
+            if chunk_idx != first_chunk_idx:
+                # if this isn't the first chunk, create another chunk
                 self.create(filename)
             data_piece = data[data_idx:data_idx+amount_to_write_in_chunk]
             res = self.write_helper(filename, data_piece, chunk_idx)
@@ -91,6 +91,7 @@ class Client():
                 time.sleep(backoff_secs)
                 backoff_secs *= 2
             else:
+                chunk_idx += 1
                 data_idx += amount_to_write_in_chunk
                 total_to_write -= amount_to_write_in_chunk
                 amount_to_write_in_chunk = min(self.chunk_size, total_to_write)
@@ -102,7 +103,7 @@ class Client():
         if (filename, chunk_idx) in self.primary_cache:
             res = self.primary_cache[(filename,chunk_idx)]
         else:
-            res = self.master_proxy.write(filename, chunk_idx)
+            res = self.master_proxy.write(filename, chunk_idx, False)
             if res == 'file not found':
                 return res
             self.primary_cache[(filename,chunk_idx)] = res
@@ -111,21 +112,49 @@ class Client():
         replica_urls = res[2]
 
         # send data to first replica, which sends data to all other replicas
-        replica_url = replica_urls[0]
-        chunkserver_proxy = ServerProxy(replica_url)
-        res = chunkserver_proxy.send_data(chunk_id, data, 1, replica_urls)
-        if res != 'success':
-            return 'failure sending data to chunkservers'
+        #TODO problem: if replica is down, we don't send data to it. 
+        # this means when master replies with new replicas, they don't have the data
+        # needed to write.
+        while len(replica_urls) > 0:
+            print('loop send data')
+            replica_url = replica_urls[0]
+            chunkserver_proxy = ServerProxy(replica_url)
+            try:
+                res = chunkserver_proxy.send_data(chunk_id, data, 1, replica_urls)
+                break
+            except Exception as e:
+                # replica is down
+                #TODO doing connection refused when server is up? wtf?
+                print(e)
+                print(chunkserver_proxy)
+                print('replica down in send data', replica_url, primary)
+                replica_urls.remove(replica_url)
+                continue
+            if res != 'success':
+                return 'failure sending data to chunkservers'
+        if len(replica_urls) == 0:
+            return 'no remaining chunkservers for requested chunk'
 
         # apply mutations on primary, then secondaries
         res = ''
         while res != 'success':
+            print('loop apply mutations', primary, replica_urls)
             primary_proxy = ServerProxy(primary)
             secondary_urls = replica_urls[:]
-            secondary_urls.remove(primary)
-            res = primary_proxy.apply_mutations(chunk_id, secondary_urls, primary, [])
-            if res == 'not primary':
-                new_res = self.master_proxy.write(filename, chunk_idx)
+            if primary in secondary_urls:
+                secondary_urls.remove(primary)
+            force_new_primary = False
+            try:
+                res = primary_proxy.apply_mutations(chunk_id, secondary_urls, \
+                        primary, [])
+                print('res of apply mutations', res)
+            except Exception as e:
+                print(e)
+                # primary is down, force master to pick another
+                print('primary down, force master pick another')
+                force_new_primary = True
+            if force_new_primary or res == 'not primary':
+                new_res = self.master_proxy.write(filename, chunk_idx, True)
                 self.primary_cache[(filename, chunk_idx)] = new_res
                 chunk_id = new_res[0]
                 primary = new_res[1]

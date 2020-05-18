@@ -23,7 +23,7 @@ class ChunkServer():
         background_thread = threading.Thread(target=self.background_thread, args=())
         background_thread.daemon = True
         background_thread.start()
-        print("server linked with master")
+        print('server initialized and linked with master')
 
     def init_from_files(self):
         #initialize self.chunk_id_to_filename based on files existing on disk
@@ -100,7 +100,14 @@ class ChunkServer():
             next_url = replica_urls[idx]
             next_proxy = ServerProxy(next_url)
             idx += 1
-            return next_proxy.send_data(chunk_id, data, idx, replica_urls)
+            try:
+                res = next_proxy.send_data(chunk_id, data, idx, replica_urls)
+            except:
+                res = 'chunkserver failure_' + next_url
+            # if next chunkserver or some chunkserver down the line failed, delete data
+            if res != 'success':
+                del self.chunk_id_to_new_data[chunk_id]
+            return res
         print('done storing and sending data:', self.chunk_id_to_new_data)
         return 'success'
 
@@ -118,11 +125,8 @@ class ChunkServer():
                 del self.chunk_id_to_timeout[chunk_id]
                 return 'not primary'
             print('is primary for chunk id:', chunk_id)
-            print('self.chunk_id_to_new_data', self.chunk_id_to_new_data)
             new_mutations = self.chunk_id_to_new_data[chunk_id][:]
-        print('after this')    
         del self.chunk_id_to_new_data[chunk_id]
-        print('in apply mutations,', self.chunk_id_to_filename, chunk_id, type(chunk_id))
         filename = self.chunk_id_to_filename[chunk_id]
         with open(self.root_dir + filename, 'a') as f:
             for data in new_mutations:
@@ -132,7 +136,12 @@ class ChunkServer():
             return 'success'
         for secondary_url in secondary_urls:
             proxy = ServerProxy(secondary_url)
-            res = proxy.apply_mutations(chunk_id, [], primary, new_mutations)
+            try:
+                res = proxy.apply_mutations(chunk_id, [], primary, new_mutations)
+            except:
+                # if chunkserver is down when applying mutations, just skip
+                # and let the master re-replication process take care of it
+                continue
             if res != 'success':
                 return 'failed applying mutation to secondary'
         return 'success'

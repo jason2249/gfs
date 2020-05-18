@@ -6,6 +6,7 @@ import time
 class Client():
     def __init__(self, chunk_size=64, master_url='http://localhost:9000', \
             cache_timeout=60):
+        random.seed(0)
         self.chunk_size = chunk_size
         self.master_proxy = ServerProxy(master_url)
         # read_cache: (filename,chunk_idx) -> [chunk_id,[replica urls],time]
@@ -54,9 +55,17 @@ class Client():
             replica_urls = res[1]
 
             # pick random replica to read from
-            replica_url = random.choice(replica_urls)
-            chunkserver_proxy = ServerProxy(replica_url)
-            s += chunkserver_proxy.read(chunk_id, chunk_offset, amount_to_read_in_chunk)
+            while len(replica_urls) > 0:
+                replica_url = random.choice(replica_urls)
+                chunkserver_proxy = ServerProxy(replica_url)
+                try:
+                    s += chunkserver_proxy.read( \
+                            chunk_id, chunk_offset, amount_to_read_in_chunk)
+                    break
+                except:
+                    replica_urls.remove(replica_urls)
+            if len(replica_urls) == 0:
+                return 'no replicas remaining for chunk'
 
             total_to_read -= amount_to_read_in_chunk
             amount_to_read_in_chunk = min(self.chunk_size, total_to_read)
@@ -76,7 +85,6 @@ class Client():
         first = True
         backoff_secs = 1
         while total_to_write > 0:
-            print('loop here')
             if chunk_idx != first_chunk_idx:
                 # if this isn't the first chunk, create another chunk
                 self.create(filename)
@@ -95,7 +103,7 @@ class Client():
                 data_idx += amount_to_write_in_chunk
                 total_to_write -= amount_to_write_in_chunk
                 amount_to_write_in_chunk = min(self.chunk_size, total_to_write)
-        print('Wrote ' + str(len(data)) + ' bytes to ' + filename)
+        return 'Wrote ' + str(len(data)) + ' bytes to ' + filename
 
 
     def write_helper(self, filename, data, chunk_idx):
@@ -112,57 +120,45 @@ class Client():
         replica_urls = res[2]
 
         # send data to first replica, which sends data to all other replicas
-        #TODO problem: if replica is down, we don't send data to it. 
-        # this means when master replies with new replicas, they don't have the data
-        # needed to write.
         while len(replica_urls) > 0:
-            print('loop send data')
             replica_url = replica_urls[0]
             chunkserver_proxy = ServerProxy(replica_url)
             try:
-                res = chunkserver_proxy.send_data(chunk_id, data, 1, replica_urls)
+                send_res = chunkserver_proxy.send_data(chunk_id, data, 1, replica_urls)
+            except:
+                send_res = 'chunkserver failure_' + replica_url
+            # if any replica failed, reselect primary and replicas
+            if send_res != 'success':
+                failed_url = send_res[send_res.rfind('_')+1:]
+                self.master_proxy.remove_chunkserver(failed_url)
+                new_lease_res = self.master_proxy.write(filename, chunk_idx, True)
+                self.primary_cache[(filename, chunk_idx)] = new_lease_res
+                chunk_id = new_lease_res[0]
+                primary = new_lease_res[1]
+                replica_urls = new_lease_res[2]
+            else:
                 break
-            except Exception as e:
-                # replica is down
-                #TODO doing connection refused when server is up? wtf?
-                print(e)
-                print(chunkserver_proxy)
-                print('replica down in send data', replica_url, primary)
-                replica_urls.remove(replica_url)
-                continue
-            if res != 'success':
-                return 'failure sending data to chunkservers'
         if len(replica_urls) == 0:
-            return 'no remaining chunkservers for requested chunk'
+            return 'no remaining replicas'
 
-        # apply mutations on primary, then secondaries
-        res = ''
-        while res != 'success':
-            print('loop apply mutations', primary, replica_urls)
+        # tell the primary to apply mutations to all secondary replicas
+        while True:
             primary_proxy = ServerProxy(primary)
             secondary_urls = replica_urls[:]
-            if primary in secondary_urls:
-                secondary_urls.remove(primary)
-            force_new_primary = False
-            try:
-                res = primary_proxy.apply_mutations(chunk_id, secondary_urls, \
-                        primary, [])
-                print('res of apply mutations', res)
-            except Exception as e:
-                print(e)
-                # primary is down, force master to pick another
-                print('primary down, force master pick another')
-                force_new_primary = True
-            if force_new_primary or res == 'not primary':
-                new_res = self.master_proxy.write(filename, chunk_idx, True)
-                self.primary_cache[(filename, chunk_idx)] = new_res
-                chunk_id = new_res[0]
-                primary = new_res[1]
-                replica_urls = new_res[2]
-            elif res == 'failed applying mutation to secondary':
-                return res
+            secondary_urls.remove(primary)
+            # to simplify state machine, assume that primary doesn't fail between selecting
+            # it a few lines above and here
+            mutation_res = primary_proxy.apply_mutations( \
+                    chunk_id, secondary_urls, primary, [])
 
-        return 'success'
+            # if lease expired, reselect primary and replicas
+            if mutation_res == 'not primary':
+                new_lease_res = self.master_proxy.write(filename, chunk_idx, True)
+                self.primary_cache[(filename, chunk_idx)] = new_lease_res
+                chunk_id = new_lease_res[0]
+                primary = new_lease_res[1]
+                replica_urls = new_lease_res[2]
+                continue
 
-
+            return mutation_res
 

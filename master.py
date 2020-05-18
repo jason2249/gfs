@@ -15,6 +15,7 @@ class FileInfo():
 
 class Master():
     def __init__(self):
+        random.seed(0)
         self.num_replicas = 2
         self.lease_duration_secs = 30
         self.deleted_file_duration_secs = 30
@@ -148,6 +149,8 @@ class Master():
 
     def remove_chunkserver(self, url_to_remove):
         # remove url of failed chunkserver from chunk_to_urls and chunkserver_url_to_proxy
+        if url_to_remove not in self.chunkserver_url_to_proxy:
+            return
         del self.chunkserver_url_to_proxy[url_to_remove]
         for chunk_id in self.chunk_to_urls:
             replica_list = self.chunk_to_urls[chunk_id]
@@ -241,12 +244,14 @@ class Master():
         replica_urls = self.chunk_to_urls[chunk_id]
 
         pick_new_primary = True
+        # see if we've already assigned a primary to this chunk
         if chunk_id in self.chunk_to_primary:
             res = self.chunk_to_primary[chunk_id]
             original_cache_timeout = res[1]
             if time.time() <= original_cache_timeout:
                 pick_new_primary = False
                 # leases are refreshed through heartbeat messages, not write requests
+        # if we didn't find a primary, or client tells us to, pick a new primary
         if force_new_primary or pick_new_primary:
             print('picking new primary for chunk id', chunk_id)
             while len(replica_urls) > 0:

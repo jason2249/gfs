@@ -5,8 +5,9 @@ import time
 
 class Client():
     def __init__(self, chunk_size=64, master_url='http://localhost:9000', \
-            cache_timeout=60):
+            cache_timeout=60, debug=False):
         random.seed(0)
+        self.debug = debug
         self.chunk_size = chunk_size
         self.master_proxy = ServerProxy(master_url)
         # read_cache: (filename,chunk_idx) -> [chunk_id,[replica urls],time]
@@ -63,7 +64,7 @@ class Client():
                             chunk_id, chunk_offset, amount_to_read_in_chunk)
                     break
                 except:
-                    replica_urls.remove(replica_urls)
+                    replica_urls.remove(replica_url)
             if len(replica_urls) == 0:
                 return 'no replicas remaining for chunk'
 
@@ -110,11 +111,15 @@ class Client():
         # locate primary and replica urls
         if (filename, chunk_idx) in self.primary_cache:
             res = self.primary_cache[(filename,chunk_idx)]
+            if self.debug:
+                print('using from primary cache:', res)
         else:
-            res = self.master_proxy.write(filename, chunk_idx, False)
+            res = self.master_proxy.get_primary(filename, chunk_idx, False)
             if res == 'file not found':
                 return res
             self.primary_cache[(filename,chunk_idx)] = res
+            if self.debug:
+                print('asked master for primary:', res)
         chunk_id = res[0]
         primary = res[1]
         replica_urls = res[2]
@@ -126,12 +131,17 @@ class Client():
             try:
                 send_res = chunkserver_proxy.send_data(chunk_id, data, 1, replica_urls)
             except:
+                if self.debug:
+                    print('exception when sending data to', replica_url)
                 send_res = 'chunkserver failure_' + replica_url
             # if any replica failed, reselect primary and replicas
             if send_res != 'success':
+                if self.debug:
+                    print('replica failed when sending data, asking for primary again')
+                    print('res=', send_res)
                 failed_url = send_res[send_res.rfind('_')+1:]
                 self.master_proxy.remove_chunkserver(failed_url)
-                new_lease_res = self.master_proxy.write(filename, chunk_idx, True)
+                new_lease_res = self.master_proxy.get_primary(filename, chunk_idx, True)
                 self.primary_cache[(filename, chunk_idx)] = new_lease_res
                 chunk_id = new_lease_res[0]
                 primary = new_lease_res[1]
@@ -153,11 +163,22 @@ class Client():
 
             # if lease expired, reselect primary and replicas
             if mutation_res == 'not primary':
-                new_lease_res = self.master_proxy.write(filename, chunk_idx, True)
+                if self.debug:
+                    print('lease expired, asking for primary again')
+                new_lease_res = self.master_proxy.get_primary(filename, chunk_idx, True)
+                old_urls = replica_urls[:]
                 self.primary_cache[(filename, chunk_idx)] = new_lease_res
                 chunk_id = new_lease_res[0]
                 primary = new_lease_res[1]
                 replica_urls = new_lease_res[2]
+
+                # resend data if the replicas changed
+                send_again_urls = [url for url in replica_urls if url not in old_urls]
+                if len(send_again_urls) > 0:
+                    if self.debug:
+                        print('sending data to new replicas')
+                    resend_proxy = ServerProxy(send_again_urls[0])
+                    resend_proxy.send_data(chunk_id, data, 1, send_again_urls)
                 continue
 
             return mutation_res

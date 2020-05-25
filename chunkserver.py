@@ -3,6 +3,7 @@ from xmlrpc.server import SimpleXMLRPCServer
 
 import os
 import pickle
+import socket
 import sys
 import threading
 import time
@@ -16,6 +17,11 @@ class ChunkServer():
         self.chunk_id_to_version = {} # int chunk_id -> int version
         self.chunk_id_to_new_data = {} # int chunk_id -> list[str] new data written
         self.chunk_id_to_timeout = {} # int chunk_id -> float lease timeout
+        self.recently_applied_data = {} # data -> int offset
+
+        # hacky way to avoid deadlock with xmlrpc -
+        # interrupt and retry when deadlock is detected
+        socket.setdefaulttimeout(2)
 
         self.init_from_files()
         chunk_list = self.get_chunks()
@@ -128,6 +134,7 @@ class ChunkServer():
         #TODO return error if file doesn't exist, use try/catch
 
     def send_data(self, chunk_id, data, idx, replica_urls):
+        print('starting send data to', replica_urls, idx)
         if chunk_id not in self.chunk_id_to_new_data:
             self.chunk_id_to_new_data[chunk_id] = []
         self.chunk_id_to_new_data[chunk_id].append(data)
@@ -137,8 +144,11 @@ class ChunkServer():
             idx += 1
             try:
                 res = next_proxy.send_data(chunk_id, data, idx, replica_urls)
-            except:
-                res = 'chunkserver failure_' + next_url
+            except Exception as e:
+                if str(e) == 'timed out':
+                    res = 'timed out'
+                else:
+                    res = 'chunkserver failure_' + next_url
             # if next chunkserver or some chunkserver down the line failed, delete data
             if res != 'success':
                 del self.chunk_id_to_new_data[chunk_id]
@@ -160,26 +170,36 @@ class ChunkServer():
                 del self.chunk_id_to_timeout[chunk_id]
                 return 'not primary'
             print('is primary for chunk id:', chunk_id)
+            if chunk_id not in self.chunk_id_to_new_data:
+                # no new data, must have been applied already.
+                # return recently applied data offsets instead
+                return self.recently_applied_data
             new_mutations = self.chunk_id_to_new_data[chunk_id][:]
+        # dictionary mapping data written to offset in file it was written at
+        data_to_offset = {}
         del self.chunk_id_to_new_data[chunk_id]
         filename = self.chunk_id_to_filename[chunk_id]
         with open(self.root_dir + filename, 'a') as f:
             for data in new_mutations:
+                curr_offset = f.tell()
                 f.write(data)
+                data_to_offset[data] = curr_offset
         print('applied mutations:', new_mutations)
         if self.url != primary:
-            return 'success'
+            return data_to_offset
         for secondary_url in secondary_urls:
             proxy = ServerProxy(secondary_url)
             try:
+                print('primary applying mutations to:', secondary_url)
                 res = proxy.apply_mutations(chunk_id, [], primary, new_mutations)
             except:
                 # if chunkserver is down when applying mutations, just skip
                 # and let the master re-replication process take care of it
                 continue
-            if res != 'success':
+            if type(res) != dict:
                 return 'failed applying mutation to secondary'
-        return 'success'
+        self.recently_applied_data = data_to_offset
+        return data_to_offset
 
 def main():
     host = sys.argv[1]

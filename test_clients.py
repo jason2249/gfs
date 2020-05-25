@@ -1,4 +1,5 @@
 import client
+import threading
 import time
 import random
 
@@ -7,13 +8,15 @@ def main():
     basic_test()
     multi_chunk_files_test()
     multi_client_same_file_sequential_test()
+    multi_client_same_file_parallel_test()
 
     print('all tests passed!')
 
 def basic_test():
     c = client.Client(cache_timeout=1)
     c.create('hello.txt')
-    c.write('hello.txt', 'hello', 0)
+    offset = c.write('hello.txt', 'hello', 0)
+    assert(offset == 0)
     res = c.read('hello.txt', 0, 5)
     assert(res == 'hello')
     c.delete('hello.txt')
@@ -33,7 +36,8 @@ def multi_chunk_files_test():
     for i in range(20):
         time.sleep(random.uniform(.01, .1))
         s = 'hello' + str(i)
-        c.write('hello.txt', s, offset)
+        res_offset = c.write('hello.txt', s, offset)
+        assert(res_offset == offset)
         offset += len(s)
         expected1 += s
     res = c.read('hello.txt', 0, offset)
@@ -46,7 +50,8 @@ def multi_chunk_files_test():
     for i in range(20):
         time.sleep(random.uniform(.01, .1))
         s = 'bye' + str(i)
-        c.write('goodbye.txt', s, offset)
+        res_offset = c.write('goodbye.txt', s, offset)
+        assert(res_offset == offset)
         offset += len(s)
         expected2 += s
     res = c.read('goodbye.txt', 0, offset)
@@ -64,17 +69,54 @@ def multi_client_same_file_sequential_test():
     expected = ''
     for i in range(10):
         if i % 2 == 0:
-            c.write('test3.txt', 'hello', offset)
+            res_offset = c.write('test3.txt', 'hello', offset)
+            assert(res_offset == offset)
             offset += len('hello')
             expected += 'hello'
         else:
-            c2.write('test3.txt', 'bye', offset)
+            res_offset = c2.write('test3.txt', 'bye', offset)
+            assert(res_offset == offset)
             offset += len('bye')
             expected += 'bye'
     res = c2.read('test3.txt', 0, offset)
     assert(res == expected)
     c.delete('test3.txt')
     print('passed multi_client_same_file_sequential_test')
+
+numbers = '1234567890!@#$%^&*()-=_+{}'
+def multi_client_same_file_parallel_test():
+    c = client.Client()
+    c2 = client.Client()
+    c.create('parallel_test.txt')
+    data_to_offset = {}
+    data_to_offset2 = {}
+    parallel_thread = threading.Thread(target=run_parallel_client_write, \
+            args=[c2, data_to_offset2])
+    parallel_thread.start()
+    offset = 0
+    for num in numbers:
+        res_offset = c.write('parallel_test.txt', num, offset)
+        data_to_offset[num] = res_offset
+        offset = res_offset + len(num)
+    parallel_thread.join()
+    for data in data_to_offset:
+        offset = data_to_offset[data]
+        res = c2.read('parallel_test.txt', offset, len(data))
+        assert(res == data)
+    for data in data_to_offset2:
+        offset = data_to_offset2[data]
+        res = c.read('parallel_test.txt', offset, len(data))
+        assert(res == data)
+    c2.delete('parallel_test.txt')
+    print('passed multi_client_same_file_parallel_test')
+
+alphabet = 'abcdefghijklmnopqrstuvwxyz'
+def run_parallel_client_write(c, data_to_offset):
+    offset = 0
+    for letter in alphabet:
+        res_offset = c.write('parallel_test.txt', letter, offset)
+        data_to_offset[letter] = res_offset
+        offset = res_offset + len(letter)
 
 if __name__ == '__main__':
     main()

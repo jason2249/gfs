@@ -83,15 +83,15 @@ class Client():
         total_to_write = len(data)
         amount_to_write_in_chunk = min(self.chunk_size - chunk_offset, total_to_write)
 
-        first = True
         backoff_secs = 1
+        offset_written_at = None
         while total_to_write > 0:
             if chunk_idx != first_chunk_idx:
                 # if this isn't the first chunk, create another chunk
                 self.create(filename)
             data_piece = data[data_idx:data_idx+amount_to_write_in_chunk]
             res = self.write_helper(filename, data_piece, chunk_idx)
-            if res != 'success':
+            if type(res) != int:
                 if res == 'file not found':
                     return res
                 # error, wait for exponential backoff and retry
@@ -100,12 +100,13 @@ class Client():
                 time.sleep(backoff_secs)
                 backoff_secs *= 2
             else:
+                if chunk_idx == first_chunk_idx:
+                    offset_written_at = res
                 chunk_idx += 1
                 data_idx += amount_to_write_in_chunk
                 total_to_write -= amount_to_write_in_chunk
                 amount_to_write_in_chunk = min(self.chunk_size, total_to_write)
-        return 'Wrote ' + str(len(data)) + ' bytes to ' + filename
-
+        return offset_written_at
 
     def write_helper(self, filename, data, chunk_idx):
         # locate primary and replica urls
@@ -139,6 +140,9 @@ class Client():
                 if self.debug:
                     print('replica failed when sending data, asking for primary again')
                     print('res=', send_res)
+                if send_res == 'timed out':
+                    time.sleep(2)
+                    continue
                 failed_url = send_res[send_res.rfind('_')+1:]
                 self.master_proxy.remove_chunkserver(failed_url)
                 new_lease_res = self.master_proxy.get_primary(filename, chunk_idx, True)
@@ -181,5 +185,8 @@ class Client():
                     resend_proxy.send_data(chunk_id, data, 1, send_again_urls)
                 continue
 
-            return mutation_res
+            # find offset of written data in mutation_res
+            offset_within_chunk = mutation_res[data]
+            written_offset = (chunk_idx * self.chunk_size) + offset_within_chunk
+            return written_offset
 

@@ -13,12 +13,14 @@ class ChunkServer():
         self.master_proxy = ServerProxy('http://localhost:9000')
         self.root_dir = '/Users/jason/temp/' + port + '/'
         self.url = 'http://' + host + ':' + port
+        self.checksum_size_bytes = 8
         self.chunk_id_to_filename = {} # int chunk_id -> str filename
         self.chunk_id_to_version = {} # int chunk_id -> int version
         self.chunk_id_to_new_data = {} # int chunk_id -> list[str] new data written
         self.chunk_id_to_timeout = {} # int chunk_id -> float lease timeout
         self.recently_applied_data = {} # data -> int offset
-
+        # (int chunk_id, int offset in chunk) -> int checksum of data
+        self.chunk_idx_to_checksum = {}
         # hacky way to avoid deadlock with xmlrpc -
         # interrupt and retry when deadlock is detected
         socket.setdefaulttimeout(2)
@@ -37,10 +39,17 @@ class ChunkServer():
         print('server initialized and linked with master')
 
     def init_from_files(self):
-        #initialize self.chunk_id_to_filename based on files existing on disk
+        # initialize self.chunk_idx_to_checksum from disk
+        if os.path.isfile(self.root_dir + 'chunk_checksums.pickle'):
+            with open(self.root_dir + 'chunk_checksums.pickle', 'rb') as f:
+                self.chunk_idx_to_checksum = pickle.load(f)
+
+        # initialize self.chunk_id_to_version from disk
         if os.path.isfile(self.root_dir + 'chunk_versions.pickle'):
             with open(self.root_dir + 'chunk_versions.pickle', 'rb') as f:
                 self.chunk_id_to_version = pickle.load(f)
+
+        # initialize self.chunk_id_to_filename based on files existing on disk
         chunk_files = os.listdir(self.root_dir)
         for filename in chunk_files:
             if filename == '.DS_Store' or filename == 'chunk_versions.pickle':
@@ -121,6 +130,9 @@ class ChunkServer():
         #TODO change to open 'x' so it fails if already exists?
         with open(self.root_dir + chunk_filename, 'w') as f:
             pass
+        self.chunk_idx_to_checksum[(chunk_id, 0)] = 0
+        with open(self.root_dir + 'chunk_checksums.pickle', 'wb') as f:
+            pickle.dump(self.chunk_idx_to_checksum, f)
         self.chunk_id_to_filename[chunk_id] = chunk_filename
         self.update_version(chunk_id, 0)
         print('chunk_id_to_filename:', self.chunk_id_to_filename)
@@ -160,6 +172,12 @@ class ChunkServer():
         print('assigning as primary for chunk id', chunk_id)
         self.chunk_id_to_timeout[chunk_id] = lease_timeout
 
+    def update_checksum(self, chunk_id_and_idx, data):
+        new_checksum = 0
+        for d in data:
+            new_checksum += ord(d)
+        self.chunk_idx_to_checksum[chunk_id_and_idx] += new_checksum
+
     def apply_mutations(self, chunk_id, secondary_urls, primary, new_mutations):
         if self.url == primary:
             if chunk_id not in self.chunk_id_to_timeout:
@@ -181,9 +199,28 @@ class ChunkServer():
         filename = self.chunk_id_to_filename[chunk_id]
         with open(self.root_dir + filename, 'a') as f:
             for data in new_mutations:
+                # write data
                 curr_offset = f.tell()
                 f.write(data)
                 data_to_offset[data] = curr_offset
+
+                # compute checksum
+                data_ptr = 0
+                cksm_idx = curr_offset // self.checksum_size_bytes
+                cksm_offset = curr_offset % self.checksum_size_bytes
+                while data_ptr < len(data):
+                    data_slice_len = min(self.checksum_size_bytes - cksm_offset, \
+                            len(data) - data_ptr)
+                    data_slice = data[data_ptr:data_ptr + data_slice_len]
+                    if (chunk_id, cksm_idx) not in self.chunk_idx_to_checksum:
+                        self.chunk_idx_to_checksum[(chunk_id, cksm_idx)] = 0
+                    self.update_checksum((chunk_id, cksm_idx), data_slice)
+                    data_ptr += data_slice_len
+                    cksm_idx += 1
+                    cksm_offset = 0
+        with open(self.root_dir + 'chunk_checksums.pickle', 'wb') as f:
+            pickle.dump(self.chunk_idx_to_checksum, f)
+
         print('applied mutations:', new_mutations)
         if self.url != primary:
             return data_to_offset

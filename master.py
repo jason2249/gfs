@@ -242,7 +242,8 @@ class Master():
             proxy = self.chunkserver_url_to_proxy[url]
             try:
                 proxy.create(filename, chunk_id)
-            except:
+            except Exception as e:
+                print('create failed:', e)
                 self.remove_chunkserver(url)
                 continue
             replica_urls.append(url)

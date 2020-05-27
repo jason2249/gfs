@@ -60,10 +60,18 @@ class Client():
                 replica_url = random.choice(replica_urls)
                 chunkserver_proxy = ServerProxy(replica_url)
                 try:
-                    s += chunkserver_proxy.read( \
+                    read_res = chunkserver_proxy.read( \
                             chunk_id, chunk_offset, amount_to_read_in_chunk)
+                    if read_res == None:
+                        if self.debug:
+                            print('invalid checksum found in replica, trying another')
+                        replica_urls.remove(replica_url)
+                        continue
+                    s += read_res
                     break
-                except:
+                except Exception as e:
+                    if self.debug:
+                        print('exception reading from replica:', e)
                     replica_urls.remove(replica_url)
             if len(replica_urls) == 0:
                 return 'no replicas remaining for chunk'

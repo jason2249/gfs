@@ -203,6 +203,33 @@ class Master():
                 break
         return cur_version, chunk_idx
 
+    def report_invalid_checksum(self, chunk_id, bad_url):
+        print(bad_url, 'has invalid checksum for', chunk_id, 'so rereplicating')
+        all_urls = self.chunkserver_url_to_proxy.keys()
+        valid_replicas = self.chunk_to_urls[chunk_id]
+        urls_without_replicas = [url for url in all_urls if url not in valid_replicas]
+        valid_replicas.remove(bad_url)
+        self.chunk_to_urls[chunk_id] = valid_replicas
+        self.replicate_single_chunk(chunk_id, valid_replicas, urls_without_replicas)
+
+    def replicate_single_chunk(self, chunk_id, replica_list, urls_without_replicas):
+        while len(urls_without_replicas) > 0:
+            url = urls_without_replicas.pop()
+            # pick random replica to copy from
+            replica = random.choice(replica_list)
+            cs_proxy = self.chunkserver_url_to_proxy[url]
+            version, _ = self.lookup_chunk_version(chunk_id)
+            res = cs_proxy.replicate_data(chunk_id, version, replica)
+            if res == 'success':
+                self.chunk_to_urls[chunk_id].append(url)
+                print('re-replicated chunk', chunk_id, 'from', replica, 'to', url)
+                break
+            elif len(urls_without_replicas) == 0:
+                print('not enough chunkservers to replicate chunk')
+                break
+            else:
+                print('chunk replication failed:', res, 'trying on different replica')
+
     def rereplicate_chunks(self):
         # loop through self.chunk_to_urls
         # for every chunk id with < self.num_replicas replicas
@@ -215,21 +242,7 @@ class Master():
             # get all urls that don't contain a replica for this chunk
             urls_without_replicas = [url for url in all_urls if url not in replica_list]
             for i in range(len(replica_list), self.num_replicas):
-                # pick a chunkserver that doesn't already have this chunk
-                while True:
-                    if len(urls_without_replicas) == 0:
-                        print('not enough chunkservers to replicate chunk')
-                        break
-                    url = urls_without_replicas.pop()
-                    # pick random replica to copy from
-                    replica = random.choice(replica_list)
-                    cs_proxy = self.chunkserver_url_to_proxy[url]
-                    version, _ = self.lookup_chunk_version(chunk_id)
-                    res = cs_proxy.replicate_data(chunk_id, version, replica)
-                    if res == 'success':
-                        self.chunk_to_urls[chunk_id].append(url)
-                        print('re-replicated chunk', chunk_id, 'from', replica, 'to', url)
-                        break
+                self.replicate_single_chunk(chunk_id, replica_list, urls_without_replicas)
 
     def create(self, filename):
         #randomly sample self.num_replicas servers to host replicas on

@@ -52,7 +52,8 @@ class ChunkServer():
         # initialize self.chunk_id_to_filename based on files existing on disk
         chunk_files = os.listdir(self.root_dir)
         for filename in chunk_files:
-            if filename == '.DS_Store' or filename == 'chunk_versions.pickle':
+            if filename == '.DS_Store' or filename == 'chunk_versions.pickle' \
+                    or filename == 'chunk_checksums.pickle':
                 continue
             underscore_idx = filename.rfind('_')
             chunk_id = int(filename[underscore_idx+1:])
@@ -65,10 +66,18 @@ class ChunkServer():
             os.remove(self.root_dir + filename)
             del self.chunk_id_to_filename[chunk_id]
             del self.chunk_id_to_version[chunk_id]
+            tups_to_delete = []
+            for (c_id, c_idx) in self.chunk_idx_to_checksum:
+                if c_id == chunk_id:
+                    tups_to_delete.append((c_id, c_idx))
+            for tup in tups_to_delete:
+                del self.chunk_idx_to_checksum[tup]
         if len(deleted_chunk_ids) > 0:
             print('deleted chunk ids:', deleted_chunk_ids)
             with open(self.root_dir + 'chunk_versions.pickle', 'wb') as f:
                 pickle.dump(self.chunk_id_to_version, f)
+            with open(self.root_dir + 'chunk_checksums.pickle', 'wb') as f:
+                pickle.dump(self.chunk_idx_to_checksum, f)
 
     def background_thread(self):
         while True:
@@ -86,7 +95,7 @@ class ChunkServer():
     def replicate_data(self, chunk_id, version, replica_url):
         replica_proxy = ServerProxy(replica_url)
         res = replica_proxy.get_data_for_chunk(chunk_id, version)
-        if res == 'stale replica':
+        if res == 'stale replica' or res == 'invalid checksum':
             return res
         filename = res[0]
         data = res[1]
@@ -95,6 +104,14 @@ class ChunkServer():
             f.write(data)
         self.update_version(chunk_id, version)
         self.chunk_id_to_filename[chunk_id] = filename
+
+        # write checksum
+        for i in range(0, len(data), self.checksum_size_bytes):
+            cksm_idx = i // self.checksum_size_bytes
+            self.chunk_idx_to_checksum[(chunk_id, cksm_idx)] = 0
+            self.update_checksum((chunk_id, cksm_idx), data[i:i+self.checksum_size_bytes])
+        with open(self.root_dir + 'chunk_checksums.pickle', 'wb') as f:
+            pickle.dump(self.chunk_idx_to_checksum, f)
         print('copied chunk', chunk_id, 'from', replica_url, 'to myself')
         return 'success'
 
@@ -105,6 +122,14 @@ class ChunkServer():
         res = None
         with open(self.root_dir + filename) as f:
             res = f.read()
+            valid_checksum = self.validate_checksum(res, chunk_id, 0)
+            if not valid_checksum:
+                print('reporting invalid checksum to master')
+                self.master_proxy.report_invalid_checksum(chunk_id, self.url)
+                # delete own copy of chunk
+                print('deleting own copy of chunk')
+                self.remove_chunks([chunk_id])
+                return 'invalid checksum'
         version = self.chunk_id_to_version[chunk_id]
         print('sending data for', filename, chunk_id, 'to other replica')
         return (filename, res, version)
@@ -137,16 +162,49 @@ class ChunkServer():
         self.update_version(chunk_id, 0)
         print('chunk_id_to_filename:', self.chunk_id_to_filename)
 
+    def validate_checksum(self, data, chunk_id, cksm_offset):
+        for i in range(cksm_offset, cksm_offset + len(data), self.checksum_size_bytes):
+            cksm_idx = i // self.checksum_size_bytes
+            if (chunk_id, cksm_idx) not in self.chunk_idx_to_checksum:
+                print('did not find checksum for chunk', chunk_id, cksm_idx)
+                return False
+            stored_checksum = self.chunk_idx_to_checksum[(chunk_id, cksm_idx)]
+            data_slice = data[i-cksm_offset:i-cksm_offset+self.checksum_size_bytes]
+            data_checksum = 0
+            for l in data_slice:
+                data_checksum += ord(l)
+            if data_checksum != stored_checksum:
+                print('checksum did not match for chunk', chunk_id, cksm_idx)
+                return False
+        return True
+
     def read(self, chunk_id, chunk_offset, amount):
+        print('reading chunk', chunk_id, 'for', amount, 'bytes')
         filename = self.root_dir + self.chunk_id_to_filename[chunk_id]
         with open(filename) as f:
-            f.seek(chunk_offset)
-            res = f.read(amount)
-            return res
-        #TODO return error if file doesn't exist, use try/catch
+            # find nearest checksum offset of given chunk_offset
+            cksm_offset = chunk_offset - (chunk_offset % self.checksum_size_bytes)
+            # round amount up to nearest multiple of checksum size
+            remainder = amount % self.checksum_size_bytes
+            if remainder == 0:
+                cksm_amount = amount
+            else:
+                cksm_amount = amount + self.checksum_size_bytes - remainder
+            f.seek(cksm_offset)
+            res = f.read(cksm_amount)
+            valid_checksum = self.validate_checksum(res, chunk_id, cksm_offset)
+            if not valid_checksum:
+                print('reporting invalid checksum to master')
+                self.master_proxy.report_invalid_checksum(chunk_id, self.url)
+                # delete own copy of chunk
+                print('deleting own copy of chunk')
+                self.remove_chunks([chunk_id])
+                return None
+            diff = chunk_offset - cksm_offset
+            return res[diff:diff + amount]
 
     def send_data(self, chunk_id, data, idx, replica_urls):
-        print('starting send data to', replica_urls, idx)
+        print('starting send data:', data, replica_urls, idx)
         if chunk_id not in self.chunk_id_to_new_data:
             self.chunk_id_to_new_data[chunk_id] = []
         self.chunk_id_to_new_data[chunk_id].append(data)
@@ -157,13 +215,17 @@ class ChunkServer():
             try:
                 res = next_proxy.send_data(chunk_id, data, idx, replica_urls)
             except Exception as e:
+                print('exception while sending data:', e)
                 if str(e) == 'timed out':
                     res = 'timed out'
                 else:
                     res = 'chunkserver failure_' + next_url
             # if next chunkserver or some chunkserver down the line failed, delete data
             if res != 'success':
-                del self.chunk_id_to_new_data[chunk_id]
+                if len(self.chunk_id_to_new_data[chunk_id]) > 1:
+                    self.chunk_id_to_new_data[chunk_id].remove(data)
+                else:
+                    del self.chunk_id_to_new_data[chunk_id]
             return res
         print('done storing and sending data:', self.chunk_id_to_new_data)
         return 'success'

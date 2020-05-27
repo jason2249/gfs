@@ -4,7 +4,7 @@ import time
 import random
 
 def main():
-
+    random.seed(0)
     basic_test()
     multi_chunk_files_test()
     multi_client_same_file_sequential_test()

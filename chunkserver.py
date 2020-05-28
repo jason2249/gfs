@@ -79,6 +79,9 @@ class ChunkServer():
             with open(self.root_dir + 'chunk_checksums.pickle', 'wb') as f:
                 pickle.dump(self.chunk_idx_to_checksum, f)
 
+    def remove_current_leases(self):
+        self.chunk_id_to_timeout = {}
+
     def background_thread(self):
         while True:
             time.sleep(self.thread_interval)

@@ -43,16 +43,26 @@ class Master():
             return
         print('initializing from log')
         chunkserver_urls = []
+
+        # read persistent data from log
         with open(self.root_dir + 'log.txt', 'rb') as f:
             chunkserver_urls = pickle.load(f)
             self.filename_to_chunks = pickle.load(f)
-            self.chunk_to_filename = pickle.load(f)
-            self.chunk_to_primary = pickle.load(f)
             self.chunk_id_counter = pickle.load(f)
+
+        # initialize self.chunk_id_to_filename to easily check mapping
+        for filename in self.filename_to_chunks:
+            chunk_list = self.filename_to_chunks[filename].chunk_list
+            for chunk_id, version in chunk_list:
+                self.chunk_to_filename[chunk_id] = filename
+
+        # get chunks from chunkservers in order to create chunk to replicas mapping
         for url in chunkserver_urls:
             cs_proxy = ServerProxy(url)
             try:
                 chunks_on_chunkserver = cs_proxy.get_chunks()
+                # if master crashed and rebooted, it loses its lease mapping in memory
+                cs_proxy.remove_current_leases()
             except:
                 # chunkserver is down
                 continue
@@ -68,8 +78,6 @@ class Master():
         with open(self.root_dir + 'log.txt', 'wb') as f:
             pickle.dump(list(self.chunkserver_url_to_proxy.keys()), f)
             pickle.dump(self.filename_to_chunks, f)
-            pickle.dump(self.chunk_to_filename, f)
-            pickle.dump(self.chunk_to_primary, f)
             pickle.dump(self.chunk_id_counter, f)
         print('flushed metadata to log')
 

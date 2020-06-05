@@ -23,7 +23,7 @@ class ChunkServer():
         self.master_proxy = ServerProxy('http://localhost:9000')
         self.root_dir = '/Users/jason/temp/' + port + '/'
         self.url = 'http://' + host + ':' + port
-        self.checksum_size_bytes = 8
+        self.checksum_size_bytes = 64
         self.chunk_id_to_filename = {} # int chunk_id -> str filename
         self.chunk_id_to_version = {} # int chunk_id -> int version
         self.chunk_id_to_new_data = {} # int chunk_id -> list[str] new data written
@@ -308,7 +308,7 @@ class ChunkServer():
     @return string: result message
     '''
     def send_data(self, chunk_id, data, idx, replica_urls):
-        print('starting send data:', data, replica_urls, idx)
+        print('starting send data:', replica_urls, idx)
         if chunk_id not in self.chunk_id_to_new_data:
             self.chunk_id_to_new_data[chunk_id] = []
         self.chunk_id_to_new_data[chunk_id].append(data)
@@ -331,7 +331,7 @@ class ChunkServer():
                 else:
                     del self.chunk_id_to_new_data[chunk_id]
             return res
-        print('done storing and sending data:', self.chunk_id_to_new_data)
+        print('done storing and sending data')
         return 'success'
 
     '''
@@ -417,7 +417,7 @@ class ChunkServer():
         with open(self.root_dir + 'chunk_checksums.pickle', 'wb') as f:
             pickle.dump(self.chunk_idx_to_checksum, f)
 
-        print('applied mutations:', new_mutations)
+        print('applied # of mutations:', len(new_mutations))
         if self.url != primary:
             return data_to_offset
         for secondary_url in secondary_urls:

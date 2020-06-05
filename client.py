@@ -11,7 +11,7 @@ import random
 import time
 
 class Client():
-    def __init__(self, chunk_size=64, master_url='http://localhost:9000', \
+    def __init__(self, chunk_size=64000, master_url='http://localhost:9000', \
             cache_timeout=60, debug=False):
         random.seed(0)
         self.debug = debug

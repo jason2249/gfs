@@ -5,6 +5,8 @@ import random
 
 def main():
     random.seed(0)
+    time_read_throughput()
+    time_write_separate_throughput()
     basic_test()
     multi_chunk_files_test()
     multi_client_same_file_sequential_test()
@@ -117,6 +119,58 @@ def run_parallel_client_write(c, data_to_offset):
         res_offset = c.write('parallel_test.txt', letter, offset)
         data_to_offset[letter] = res_offset
         offset = res_offset + len(letter)
+
+def client_read():
+    c = client.Client()
+    for i in range(250):
+        rand_start = random.randint(0, 99996)
+        read_res = c.read('read_throughput.txt', rand_start, 4000)
+
+def read_throughput_test():
+    num_readers = 1
+    all_threads = []
+    for i in range(num_readers):
+        parallel_thread = threading.Thread(target=client_read, \
+                args=[])
+        all_threads.append(parallel_thread)
+        parallel_thread.start()
+    for t in all_threads:
+        t.join()
+
+def time_read_throughput():
+    c = client.Client()
+    c.create('read_throughput.txt')
+    res = c.write('read_throughput.txt', 'a'*10000000, 0)
+    assert(res == 0)
+    start_time = time.time()
+    read_throughput_test()
+    end_time = time.time()
+    print('read_throughput_test took', end_time-start_time, 'seconds')
+
+def client_write_separate(i):
+    c = client.Client()
+    fname = 'client_write_separate' + str(i) + '.txt'
+    c.create(fname)
+    offset = 0
+    c.write(fname, 'a'*1000000, offset)
+    offset += 1000000
+
+def write_separate_throughput_test():
+    num_writers = 1
+    all_threads = []
+    for i in range(num_writers):
+        parallel_thread = threading.Thread(target=client_write_separate, \
+                args=[i])
+        all_threads.append(parallel_thread)
+        parallel_thread.start()
+    for t in all_threads:
+        t.join()
+
+def time_write_separate_throughput():
+    start_time = time.time()
+    write_separate_throughput_test()
+    end_time = time.time()
+    print('write_separate_throughput_test took', end_time-start_time, 'seconds')
 
 if __name__ == '__main__':
     main()

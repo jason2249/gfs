@@ -200,7 +200,9 @@ class Master():
         for chunkId in chunks_to_delete:
             del self.chunk_to_filename[chunkId]
             del self.chunk_to_urls[chunkId]
-            del self.chunk_to_primary[chunkId]
+            # When master crashes, chunk_to_primary is lost, so this may be gone from memory
+            if chunkId in self.chunk_to_primary:
+                del self.chunk_to_primary[chunkId]
 
         if len(filenames_to_delete) > 0 or len(chunks_to_delete) > 0:
             self.flush_to_log()
